@@ -1,0 +1,1566 @@
+---
+title: "MA 679 Final Project"
+author: "Chunlin Liu"
+date: "2026-04-25"
+output:
+  pdf_document: default
+  html_document: default
+  word_document: default
+---
+
+
+EDA
+
+
+```{r setup, include=FALSE}
+library(foreign)
+library(haven)
+library(dplyr)
+library(tidyverse)
+library(ggplot2)
+library(tableone)
+library(MASS)
+library(car)
+
+
+Sleeping_length_pre <- read_xpt("P_SLQ.xpt.txt")
+Sleeping_length_post <- read_xpt("SLQ_L.xpt.txt")
+
+Demographic_pre <- read_xpt("P_DEMO.xpt.txt")
+Demographic_post <- read_xpt("DEMO_L.xpt.txt")
+
+Depression_pre <- read_xpt("P_DPQ.xpt.txt")
+Depression_post <- read_xpt("DPQ_L.xpt.txt")
+
+
+Sleep_all <- bind_rows(Sleeping_length_pre, Sleeping_length_post)
+Demographic_all  <- bind_rows(Demographic_pre, Demographic_post)
+Depress_all <- bind_rows(Depression_pre, Depression_post)
+
+nhanes_all <- Depress_all %>%
+  left_join(Sleep_all, by = "SEQN") %>%
+  left_join(Demographic_all, by = "SEQN")
+
+
+
+# function to convert NHANES missing codes
+clean_nhanes_missing <- function(x) {
+  x <- ifelse(x %in% c(77, 99, 777, 9999, 77777, 99999), NA, x)
+  return(x) 
+}
+
+
+colSums(is.na(nhanes_all))
+
+
+vars_to_keep <- c(
+  "SEQN",
+  "SLQ300", "SLQ310", "SLQ320", "SLQ330",
+  "SLD012", "SLD013",
+  paste0("DPQ0", c("10","20","30","40","50","60","70","80","90")),
+  "DPQ100",
+  "RIDAGEYR", "RIAGENDR", "RIDRETH3", "DMDEDUC2","DMDMARTZ","RIDEXPRG", "INDFMPIR","DMDBORN4", "DMDMARTZ", "INDFMPIR"
+)
+
+
+
+data_raw <- nhanes_all %>%
+  dplyr::select(all_of(vars_to_keep))
+
+
+data_raw <- data_raw %>%
+  mutate(
+    pregnant = case_when(
+      RIDEXPRG == 1 ~ "Pregnant",
+      TRUE ~ "NotPregnant"
+    )
+  )
+
+data_raw <- data_raw %>%
+  mutate(
+    marital3group = case_when(
+      DMDMARTZ == 1 ~ "Partnered",
+      DMDMARTZ == 2 ~ "PreviouslyMarried",
+      DMDMARTZ == 3 ~ "NeverMarried",
+      TRUE ~ "Unknown"
+    )
+  )
+
+
+colSums(is.na(data_raw))
+
+#re structure data on sleeping category
+df <- data_raw %>%
+  mutate(
+    sleep_hours = SLD012,
+    sleep_cat = case_when(
+      sleep_hours < 6 ~ "<6h",
+      sleep_hours >= 6 & sleep_hours <= 8 ~ "6-8h",
+      sleep_hours > 8 ~ ">8h",
+      TRUE ~ NA_character_
+    )
+  )
+
+
+# also do the re structure of education level
+
+df <- df %>%
+  mutate(
+    edu_level = case_when(
+      DMDEDUC2 == 1 ~ "Less than 9th",
+      DMDEDUC2 == 2 ~ "9-11th (no diploma)",
+      DMDEDUC2 == 3 ~ "High school/GED",
+      DMDEDUC2 == 4 ~ "Some college/AA",
+      DMDEDUC2 == 5 ~ "College or above",
+      TRUE ~ "Unknown"
+    ),
+    edu_level = factor(edu_level,
+                       levels = c("Less than 9th",
+                                  "9-11th (no diploma)",
+                                  "High school/GED",
+                                  "Some college/AA",
+                                  "College or above",
+                                  "Unknown"))
+  )
+
+
+
+table(df$edu_level)
+
+
+ggplot(df, aes(x = edu_level)) +
+  geom_bar() +
+  labs(
+    title = "Education Level Distribution",
+    x = "Education Level",
+    y = "Count"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+
+
+
+# use the sum of depression to categorize grades
+df <- df %>%
+  mutate(
+    phq9 = DPQ010 + DPQ020 + DPQ030 + DPQ040 + DPQ050 +
+           DPQ060 + DPQ070 + DPQ080 + DPQ090,
+    depressed_score = ifelse(phq9 >= 10, 1, 0)
+  )
+
+df$sleep_cat <- factor(df$sleep_cat,
+                       levels = c("<6h", "6-8h", ">8h"))
+
+
+
+# variables to check
+vars <- c("DMDBORN4", "DMDMARTZ", "RIDEXPRG", "INDFMPIR")
+
+# calculate missing counts and missing rates
+missing_summary <- data.frame(
+  Variable = vars,
+  Missing_Count = sapply(Demographic_all[vars], function(x) sum(is.na(x))),
+  Total_N = nrow(Demographic_all),
+  Missing_Rate = sapply(Demographic_all[vars], function(x) mean(is.na(x)))
+)
+
+# convert to percentage
+missing_summary$Missing_Rate_Percent <- round(
+  missing_summary$Missing_Rate * 100, 2
+)
+
+missing_summary
+
+
+
+# keep only people eligible for marital status question
+adult20 <- Demographic_all %>%
+  filter(RIDAGEYR >= 20)
+
+# recode marital status
+adult20 <- adult20 %>%
+  mutate(
+    marital_status = case_when(
+      DMDMARTZ == 1 ~ "Married/Living with partner",
+      DMDMARTZ == 2 ~ "Widowed/Divorced/Separated",
+      DMDMARTZ == 3 ~ "Never married",
+      is.na(DMDMARTZ) ~ "Missing"
+    )
+  )
+
+# summary
+marital_summary <- adult20 %>%
+  count(marital_status) %>%
+  mutate(
+    percent = round(n / sum(n) * 100, 2)
+  )
+
+# missing rate among eligible people
+missing_rate <- mean(is.na(adult20$DMDMARTZ))
+
+cat("Missing rate among age >= 20:",
+    round(missing_rate * 100, 2), "%\n\n")
+
+marital_summary
+
+```
+
+EDA
+
+```{r}
+CreateTableOne(vars = c("sleep_hours","phq9","RIDAGEYR","RIAGENDR","DMDEDUC2","DMDBORN4", "DMDMARTZ", "INDFMPIR"),
+               strata = "sleep_cat", data = df, test = FALSE)
+
+
+# sleep hours
+ggplot(df, aes(sleep_hours)) +
+  geom_histogram(bins = 24) +
+  labs(title = "Distribution of Sleep Hours")
+
+
+
+#depression
+
+  #shown in grades
+ggplot(df, aes(phq9)) +
+  geom_histogram(bins = 30) +
+  labs(title = "Distribution of PHQ-9 Score")
+
+  # log phq9
+df <- df %>%
+  mutate(
+    log_phq9 = log(phq9 )
+  )
+
+ggplot(df, aes(x = log_phq9)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Log-Transformed PHQ-9 Score",
+    x = "log(PHQ-9)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+  #shown in groups
+df <- df %>%
+  mutate(
+    phq_cat = case_when(
+      phq9 < 5 ~ "None",
+      phq9 < 10 ~ "Mild",
+      phq9 < 15 ~ "Moderate",
+      TRUE ~ "Severe"
+    ),
+    phq_cat = factor(phq_cat, ordered = TRUE)
+  )
+
+
+df %>%
+  count(phq_cat) %>%
+  mutate(percent = n / sum(n) * 100) %>%
+  ggplot(aes(x = phq_cat, y = percent)) +
+  geom_col() +
+  labs(
+    title = "Distribution of PHQ-9 Categories",
+    x = "Depression Category",
+    y = "Percent (%)"
+  )
+
+
+
+
+# when to go to bed
+
+library(lubridate)
+df <- df %>%
+  mutate(
+    bed_time_weekday = hm(SLQ300),
+    wake_weekday = hm(SLQ310),
+    bed_time_weekend = hm(SLQ320),
+    wake_weekend = hm(SLQ330)
+  )
+
+
+df <- df %>%
+  mutate(
+    bed_time_weekday_hour = hour(bed_time_weekday) + minute(bed_time_weekday)/60,
+    bed_time_weekend_hour = hour(bed_time_weekend) + minute(bed_time_weekend)/60
+  )
+
+
+
+# bed time on weekdays
+ggplot(df, aes(x = bed_time_weekday_hour)) +
+  geom_histogram(bins = 24) +
+  labs(
+    title = "Weekday Bedtime",
+    x = "Hours",
+    y = "Count"
+  )
+
+#bed time on weekends
+
+
+ggplot(df, aes(x = bed_time_weekend_hour)) +
+  geom_histogram(bins = 24) +
+  labs(
+    title = "Weekend Bedtime",
+    x = "Hours",
+    y = "Count"
+  )
+
+# depression grades different by sleeping categorys
+ggplot(df, aes(x = sleep_cat, y = phq9)) +
+  geom_boxplot()
+
+#table for depression and sleep length
+df %>%
+  group_by(sleep_cat) %>%
+  summarise(
+    depression_score = mean(depressed_score, na.rm = TRUE)
+  )
+
+
+ggplot(df, aes(x = phq_cat, fill = sleep_cat)) +
+  geom_bar(position = "fill") +
+  labs(
+    title = "PHQ-9 Category by Sleep Length",
+    x = "Depression Category",
+    y = "Proportion"
+  )
+
+# heatmap for depression and sleeping length
+
+library(dplyr)
+library(ggplot2)
+library(reshape2)
+
+# Select variables for heatmap
+df_heat <- df %>%
+  dplyr::select(
+    depressed_score,
+    sleep_cat,
+    bed_time_weekday_hour,
+    bed_time_weekend_hour,
+    RIDAGEYR,
+    RIAGENDR,
+    RIDRETH3,
+    DMDEDUC2,
+    DMDMARTZ,
+    INDFMPIR,
+    DMDBORN4
+  ) %>%
+  mutate(across(everything(), ~ as.numeric(as.factor(.))))
+
+# Correlation matrix
+cor_matrix <- cor(
+  df_heat,
+  method = "spearman",
+  use = "pairwise.complete.obs"
+)
+
+# Heatmap data
+
+library(reshape2)
+cor_df <- melt(cor_matrix)
+
+# Plot heatmap
+ggplot(cor_df, aes(x = Var1, y = Var2, fill = value)) +
+  geom_tile() +
+  geom_text(aes(label = round(value, 2)), size = 3) +
+  labs(
+    title = "Spearman Correlation Heatmap",
+    x = "",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    axis.text.y = element_text(size = 8)
+  )
+
+
+#table for depression and gender
+df %>%
+  group_by(RIAGENDR) %>%
+  summarise(
+    mean_sleep = mean(sleep_hours, na.rm=TRUE),
+    mean_phq9 = mean(phq9, na.rm=TRUE)
+  )
+
+#summary for depression(binomial) and depression phq9(sum of score)
+summary(df$depressed_score)
+summary(df$phq9)
+
+
+#check missing data
+library(dplyr)
+missing_table <- df %>%
+  summarise(across(
+    everything(),
+    ~ sum(is.na(.))
+  )) %>%
+
+  tidyr::pivot_longer(
+    cols = everything(),
+    names_to = "Variable",
+    values_to = "Missing_Count"
+  ) %>%
+  mutate(
+    Total_N = nrow(df),
+    Missing_Rate = round(Missing_Count / Total_N * 100, 2)
+  ) %>%
+  arrange(desc(Missing_Rate))
+missing_table
+
+
+```
+
+
+modeling
+
+
+
+
+
+
+
+
+
+
+
+# redge and lasso for dimention reduction
+
+
+```{r}
+
+
+library(dplyr)
+library(tidyr)
+library(glmnet)
+
+# redge
+nhanes_ml <- nhanes_all %>%
+  filter(RIDAGEYR >= 20) %>%
+  mutate(
+    # create PHQ-9 total score
+    phq9 = DPQ010 + DPQ020 + DPQ030 +
+      DPQ040 + DPQ050 + DPQ060 +
+      DPQ070 + DPQ080 + DPQ090,
+    
+    # create sleep hours from raw NHANES variable
+    sleep_hours = SLD012,
+    
+    # binary outcome
+    depressed = ifelse(phq9 >= 10, 1, 0),
+    
+    # sleep category
+    sleep_cat = case_when(
+      sleep_hours < 6 ~ "<6h",
+      sleep_hours <= 8 ~ "6-8h",
+      sleep_hours > 8 ~ ">8h"
+    ),
+    
+    # marital status
+    marital3group = case_when(
+      DMDMARTZ == 1 ~ "Married/Partner",
+      DMDMARTZ == 2 ~ "Previously Married",
+      DMDMARTZ == 3 ~ "Never Married"
+    )
+  ) %>%
+  dplyr::select(
+    depressed,
+    sleep_cat,
+    RIDAGEYR,
+    RIAGENDR,
+    RIDRETH3,
+    DMDEDUC2,
+    marital3group,
+    INDFMPIR,
+    DMDBORN4
+  ) %>%
+  drop_na()
+
+# predictor matrix
+
+x <- model.matrix(
+  depressed ~ .,
+  data = nhanes_ml
+)[, -1]
+
+# outcome
+y <- nhanes_ml$depressed
+
+
+# Ridge logistic regression
+
+set.seed(123)
+#ridge_cv <- cv.glmnet(
+#  x,
+#  y,
+#  alpha = 0,     
+#  family = "binomial"
+
+#)
+
+# plot CV error
+
+#plot(ridge_cv)
+
+# best lambda
+
+#ridge_cv$lambda.min
+#ridge_cv$lambda.1se
+# coefficients at lambda.min
+#coef(ridge_cv, s = "lambda.min")
+
+# coefficients at lambda.1se
+#coef(ridge_cv, s = "lambda.1se")
+
+
+
+
+
+# lasso
+
+
+ create predictor matrix
+x <- model.matrix(
+  depressed ~ .,
+  data = nhanes_ml
+)[, -1]
+
+ outcome
+y <- nhanes_ml$depressed
+
+ fit cross-validated LASSO logistic regression
+set.seed(123)
+
+lasso_cv <- cv.glmnet(
+  x,
+  y,
+  alpha = 1,
+  family = "binomial"
+)
+
+# plot CV error
+plot(lasso_cv)
+
+# coefficients at lambda.min
+coef(lasso_cv, s = "lambda.min")
+
+# coefficients at lambda.1se
+coef(lasso_cv, s = "lambda.1se")
+
+```
+
+
+In the final model, I would keep variables: sleep_cat, RIDAGEYR, RIAGENDR, DMDEDUC2, marital3group, INDFMPIR, and DMDBORN4. 
+
+
+```{r}
+library(dplyr)
+library(lubridate)
+
+nhanes_ml <- nhanes_all %>%
+  filter(RIDAGEYR >= 20) %>%
+  
+  mutate(
+    
+    phq9 = DPQ010 + DPQ020 + DPQ030 +
+      DPQ040 + DPQ050 + DPQ060 +
+      DPQ070 + DPQ080 + DPQ090,
+    phq_cat = case_when(
+      phq9 < 5 ~ "None",
+      phq9 < 10 ~ "Mild",
+      phq9 < 15 ~ "Moderate",
+      phq9 >= 15 ~ "Severe",
+      TRUE ~ NA_character_
+    ),
+    
+    depressed = ifelse(phq9 >= 10, 1, 0),
+    
+    sleep_hours = SLD012,
+    
+    sleep_cat = case_when(
+      sleep_hours < 6 ~ "<6h",
+      sleep_hours <= 8 ~ "6-8h",
+      sleep_hours > 8 ~ ">8h"
+    ),
+    
+    # convert character times like "22:30"
+    bed_time_weekday =
+      hm(as.character(SLQ300)),
+    
+    bed_time_weekend =
+      hm(as.character(SLQ320)),
+    
+    bed_time_weekday_hour =
+      hour(bed_time_weekday) +
+      minute(bed_time_weekday) / 60,
+    
+    bed_time_weekend_hour =
+      hour(bed_time_weekend) +
+      minute(bed_time_weekend) / 60,
+    
+    marital3group = case_when(
+      DMDMARTZ == 1 ~ "Married/Partner",
+      DMDMARTZ == 2 ~ "Previously Married",
+      DMDMARTZ == 3 ~ "Never Married"
+    )
+    
+  ) %>%
+  
+  dplyr::select(
+    depressed,
+    phq9,
+    phq_cat,
+    sleep_cat,
+    bed_time_weekday_hour,
+    bed_time_weekend_hour,
+    RIDAGEYR,
+    RIAGENDR,
+    DMDEDUC2,
+    marital3group,
+    INDFMPIR,
+    DMDBORN4
+  ) %>%
+  
+  drop_na()
+
+
+```
+
+
+
+
+
+
+
+
+
+# split training and testing data
+
+```{r}
+library(caret)
+
+
+set.seed(123)
+
+# create train/test split
+train_index <- createDataPartition(
+  nhanes_ml$depressed,
+  p = 0.7,
+  list = FALSE
+)
+
+# training data
+train_data <- nhanes_ml[train_index, ]
+
+# testing data
+test_data <- nhanes_ml[-train_index, ]
+
+# check sizes
+dim(train_data)
+dim(test_data)
+
+# check outcome balance
+prop.table(table(train_data$depressed))
+prop.table(table(test_data$depressed))
+```
+
+# corss validation
+
+```{r}
+library(caret)
+
+# make sure outcome is factor
+train_data$depressed <- factor(
+  train_data$depressed,
+  levels = c(0, 1)
+)
+
+# 5-fold cross validation setup
+ctrl <- trainControl(
+  method = "cv",
+  number = 5
+)
+
+# logistic regression with CV
+cv_log_model <- train(
+  depressed ~
+    sleep_cat +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_data,
+  method = "glm",
+  family = "binomial",
+  trControl = ctrl
+)
+
+# results
+cv_log_model
+```
+
+
+
+
+
+
+
+# binary outcome model
+
+```{r}
+library(dplyr)
+
+library(caret)
+
+# binary logistic regression model
+
+log_model <- glm(
+  depressed ~
+    sleep_cat +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+
+  family = binomial,
+
+  data = train_data
+
+)
+
+
+
+
+
+summary(log_model)
+
+# predicted probabilities
+
+
+
+pred_prob <- predict(
+
+  log_model,
+
+  newdata = test_data,
+
+  type = "response"
+
+)
+
+# convert probabilities to classes
+
+pred_class <- ifelse(pred_prob > 0.5, 1, 0)
+
+# confusion matrix
+
+confusionMatrix(
+
+  factor(pred_class),
+
+  factor(test_data$depressed)
+
+)
+```
+
+
+
+
+
+
+
+
+Comparing these two model, incuding the preduction accuracy and AIC, binary model is a better choice. 
+
+
+# check ROC-AUC plot
+
+```{r}
+# predicted probabilities from logistic model
+pred_prob <- predict(
+  log_model,
+  newdata = test_data,
+  type = "response"
+)
+
+# create prediction classes at many thresholds
+thresholds <- seq(0, 1, by = 0.01)
+
+roc_data <- data.frame()
+
+for (t in thresholds) {
+  
+  pred_class <- ifelse(pred_prob >= t, 1, 0)
+  
+  TP <- sum(pred_class == 1 & test_data$depressed == 1)
+  TN <- sum(pred_class == 0 & test_data$depressed == 0)
+  FP <- sum(pred_class == 1 & test_data$depressed == 0)
+  FN <- sum(pred_class == 0 & test_data$depressed == 1)
+  
+  sensitivity <- TP / (TP + FN)
+  specificity <- TN / (TN + FP)
+  
+  roc_data <- rbind(
+    roc_data,
+    data.frame(
+      threshold = t,
+      sensitivity = sensitivity,
+      specificity = specificity
+    )
+  )
+}
+
+# false positive rate
+roc_data$fpr <- 1 - roc_data$specificity
+
+
+auc <- sum(
+  diff(roc_data$fpr) *
+    (head(roc_data$sensitivity, -1) +
+       tail(roc_data$sensitivity, -1)) / 2
+)
+
+# ROC curve
+ggplot(roc_data, aes(x = fpr, y = sensitivity)) +
+  geom_line(linewidth = 1) +
+  geom_abline(
+    slope = 1,
+    intercept = 0,
+    linetype = "dashed"
+  ) +
+  annotate(
+    "text",
+    x = 0.7,
+    y = 0.2,
+    label = paste("AUC =", round(auc, 3)),
+    size = 5
+  ) +
+  labs(
+    title = "ROC Curve for Logistic Regression",
+    x = "False Positive Rate",
+    y = "True Positive Rate"
+  ) +
+
+  theme_minimal()
+
+
+
+```
+
+
+# decision tree
+```{r}
+library(tree)
+
+# fit classification tree
+tree_model <- tree(
+  factor(depressed) ~
+    sleep_cat +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_data
+)
+
+# summary
+summary(tree_model)
+
+# plot tree
+plot(tree_model)
+text(tree_model, pretty = 0)
+
+# predictions
+tree_pred <- predict(
+  tree_model,
+  newdata = test_data,
+  type = "class"
+)
+
+# confusion matrix
+table(
+  Predicted = tree_pred,
+  Actual = test_data$depressed
+)
+
+
+# use bed time to do tree
+
+
+
+train_balanced <- train_data %>%
+  group_by(depressed) %>%
+  sample_n(min(table(train_data$depressed))) %>%
+  ungroup()
+
+
+tree_model_bal <- tree(
+  factor(depressed) ~
+    sleep_cat +
+    bed_time_weekday_hour +
+    bed_time_weekend_hour +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_balanced
+)
+
+plot(tree_model_bal)
+text(tree_model_bal, pretty = 0)
+
+
+```
+
+# random forest
+
+```{r}
+library(randomForest)
+
+set.seed(123)
+
+# random forest model
+rf_model <- randomForest(
+  factor(depressed) ~
+    sleep_cat +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_data,
+  
+  ntree = 500,
+  importance = TRUE
+)
+
+# model summary
+print(rf_model)
+
+# variable importance
+importance(rf_model)
+
+# importance plot
+varImpPlot(rf_model)
+
+# predictions
+rf_pred <- predict(
+  rf_model,
+  newdata = test_data
+)
+
+# confusion matrix
+table(
+  Predicted = rf_pred,
+  Actual = test_data$depressed
+)
+
+
+
+
+
+# Create balanced training data
+
+
+table(train_data$depressed)
+
+set.seed(123)
+
+train_balanced <- train_data %>%
+  group_by(depressed) %>%
+  sample_n(min(table(train_data$depressed))) %>%
+  ungroup()
+
+# check balance
+table(train_balanced$depressed)
+
+
+# Refit Random Forest
+
+
+set.seed(123)
+
+rf_model_bal <- randomForest(
+  factor(depressed) ~
+    sleep_cat +
+    bed_time_weekday_hour +
+    bed_time_weekend_hour +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_balanced,
+  
+  ntree = 500,
+  importance = TRUE
+)
+
+# model summary
+print(rf_model_bal)
+
+
+# Variable Importance
+
+
+importance(rf_model_bal)
+
+varImpPlot(rf_model_bal)
+
+
+# Predictions on ORIGINAL test set
+
+
+rf_pred_bal <- predict(
+  rf_model_bal,
+  newdata = test_data
+)
+
+# confusion matrix
+confusionMatrix(
+  factor(rf_pred_bal),
+  factor(test_data$depressed)
+)
+
+```
+
+Sleep duration category alone may have limited predictive contribution compared with socioeconomic and demographic variables. Accuracy can be misleading under class imbalance
+
+Refitting the model, the accuracy decreased. However, it is a bias variance trade off. Although the overall accuracy became lower, the balanced model improved its ability to identify depressed individuals rather than simply predicting the majority class. As a result, sensitivity and balanced accuracy improved, leading to a more meaningful and clinically useful classification model.
+
+
+
+# SVM
+```{r}
+library(e1071)
+library(caret)
+
+# make sure factor outcome
+train_balanced$depressed <- factor(
+  train_balanced$depressed,
+  levels = c(0, 1)
+)
+
+test_data$depressed <- factor(
+  test_data$depressed,
+  levels = c(0, 1)
+)
+
+
+
+# Linear SVM
+
+
+set.seed(123)
+
+svm_linear <- svm(
+  depressed ~
+    sleep_cat +
+    bed_time_weekday_hour +
+    bed_time_weekend_hour +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+
+  data = train_balanced,
+  kernel = "linear",
+  cost = 1,
+  scale = TRUE
+
+)
+
+
+
+# predictions
+
+svm_linear_pred <- predict(
+  svm_linear,
+  newdata = test_data
+)
+
+
+# evaluation
+
+confusionMatrix(
+  svm_linear_pred,
+  test_data$depressed,
+  positive = "1"
+)
+
+
+# Radial SVM
+
+
+set.seed(123)
+
+svm_model <- svm(
+  depressed ~
+    sleep_cat +
+    bed_time_weekday_hour +
+    bed_time_weekend_hour +
+    RIDAGEYR +
+    RIAGENDR +
+    DMDEDUC2 +
+    marital3group +
+    INDFMPIR +
+    DMDBORN4,
+  
+  data = train_balanced,
+  
+  kernel = "radial",
+  cost = 1,
+  gamma = 0.1,
+  
+  scale = TRUE
+)
+
+# predictions
+svm_pred <- predict(
+  svm_model,
+  newdata = test_data
+)
+
+# confusion matrix
+confusionMatrix(
+  svm_pred,
+  test_data$depressed,
+  positive = "1"
+)
+
+
+
+```
+
+
+# polychoric PCA
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(psych)
+
+phq_items <- nhanes_all %>%
+  filter(RIDAGEYR >= 20) %>%
+  dplyr::select(
+    DPQ010, DPQ020, DPQ030,
+    DPQ040, DPQ050, DPQ060,
+    DPQ070, DPQ080, DPQ090
+  ) %>%
+  mutate(across(
+    everything(),
+    ~ as.numeric(.)
+  )) %>%
+  mutate(across(
+    everything(),
+    ~ ifelse(. %in% c(7, 9, 77, 99), NA, .)
+  )) %>%
+  drop_na()
+
+# check values should only be 0,1,2,3
+lapply(phq_items, table)
+
+
+
+
+
+
+```
+
+
+# Paper style table
+
+
+```{r}
+library(dplyr)
+library(tidyr)
+library(knitr)
+library(kableExtra)
+
+missing_table_paper <- missing_table %>%
+  filter(Missing_Count > 0) %>%
+  mutate(
+    Missing_Rate = paste0(Missing_Rate, "%")
+  ) %>%
+  rename(
+    `Variable` = Variable,
+    `Missing Count` = Missing_Count,
+    `Total N` = Total_N,
+    `Missing Rate` = Missing_Rate
+  )
+
+kable(
+  missing_table_paper,
+  caption = "Table 1. Missingness Summary of Variables",
+  align = c("l", "r", "r", "r"),
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE,
+    font_size = 10
+  )
+
+missing_table_paper <- missing_table %>%
+  filter(Missing_Count > 0) %>%
+  slice_max(Missing_Rate, n = 10) %>%
+  mutate(
+    Missing_Rate = paste0(Missing_Rate, "%")
+  ) %>%
+  rename(
+    `Variable` = Variable,
+    `Missing Count` = Missing_Count,
+    `Total N` = Total_N,
+    `Missing Rate` = Missing_Rate
+  )
+
+kable(
+  missing_table_paper,
+  caption = "Table 1. Missingness Summary of Variables",
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE,
+    font_size = 10
+  )
+
+
+
+library(broom)
+
+logit_table <- broom::tidy(log_model) %>%
+  mutate(
+    Odds_Ratio = exp(estimate),
+    estimate = round(estimate, 3),
+    Odds_Ratio = round(Odds_Ratio, 3),
+    p.value = round(p.value, 4)
+  ) %>%
+  dplyr::select(
+    term,
+    estimate,
+    Odds_Ratio,
+    p.value
+  ) %>%
+  rename(
+    Variable = term,
+    Coefficient = estimate,
+    `Odds Ratio` = Odds_Ratio,
+    `P-value` = p.value
+  )
+
+kable(
+  logit_table,
+  caption = "Table 2. Logistic Regression Results",
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+
+
+lasso_coef <- coef(lasso_cv, s = "lambda.min")
+
+lasso_table <- data.frame(
+  Variable = rownames(lasso_coef),
+  Coefficient = as.numeric(lasso_coef)
+) %>%
+  filter(Coefficient != 0)
+
+kable(
+  lasso_table,
+  caption = "Table 3. Non-Zero Coefficients Selected by LASSO",
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+
+
+
+
+
+rf_importance <- importance(rf_model_bal)
+
+rf_table <- data.frame(
+  Variable = rownames(rf_importance),
+  MeanDecreaseAccuracy = round(rf_importance[, "MeanDecreaseAccuracy"], 2),
+  MeanDecreaseGini = round(rf_importance[, "MeanDecreaseGini"], 2)
+) %>%
+  arrange(desc(MeanDecreaseGini))
+
+kable(
+  rf_table,
+  caption = "Table 5. Random Forest Variable Importance",
+  booktabs = TRUE
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+
+
+
+model_results <- data.frame(
+  Model = c(
+    "Logistic Regression",
+    "Decision Tree",
+    "Balanced Random Forest",
+    "Linear SVM",
+    "Radial SVM"
+  ),
+  Accuracy = c(
+    0.62,
+    0.60,
+    0.62,
+    0.62,
+    0.60
+  ),
+  Sensitivity = c(
+    0.62,
+    0.58,
+    0.58,
+    0.62,
+    0.63
+  ),
+  Specificity = c(
+    0.60,
+    0.55,
+    0.63,
+    0.62,
+    0.60
+  ),
+  Balanced_Accuracy = c(
+    0.61,
+    0.56,
+    0.60,
+    0.62,
+    0.62
+  )
+)
+
+kable(
+  model_results,
+  caption = "Table 6. Model Performance Comparison",
+  booktabs = TRUE,
+  digits = 3
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+
+
+
+
+svm_results <- data.frame(
+  Model = c("Linear SVM", "Radial SVM"),
+  Accuracy = c(0.622, 0.602),
+  Sensitivity = c(0.620, 0.632),
+  Specificity = c(0.622, 0.599),
+  Balanced_Accuracy = c(0.621, 0.616)
+)
+
+kable(
+  svm_results,
+  caption = "Table 7. SVM Model Performance",
+  booktabs = TRUE,
+  digits = 3
+) %>%
+  kable_styling(
+    latex_options = c("hold_position", "striped"),
+    full_width = FALSE
+  )
+
+
+
+```
+
+
+
+MA 677 final assignment
+
+```{r}
+
+
+library(dplyr)
+library(tidyr)
+library(ggplot2)
+
+
+
+dpq_vars <- grep("^DPQ", names(nhanes_all), value = TRUE)
+
+
+
+nhanes_clean <- nhanes_all %>%
+  mutate(
+    across(all_of(dpq_vars), ~replace_na(., 0))
+  )
+
+
+
+nhanes_clean$depression_score <- rowSums(
+  dplyr::select(nhanes_clean, all_of(dpq_vars)),
+  na.rm = TRUE
+)
+
+
+
+nhanes_clean <- nhanes_clean %>%
+  mutate(
+    log_depression_score = log(depression_score + 1)
+  )
+
+
+
+
+
+
+p1 <- ggplot(nhanes_clean, aes(x = depression_score)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Depression Score",
+    x = "Depression Score",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+
+p2 <- ggplot(nhanes_clean, aes(x = log_depression_score)) +
+  geom_histogram(bins = 30) +
+  labs(
+    title = "Distribution of Log Transformed Depression Score",
+    x = "log(Depression Score + 1)",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+
+p1
+p2
+
+
+
+
+library(MASS)
+
+
+nhanes_clean <- nhanes_clean %>%
+  mutate(
+    sqrt_depression_score = sqrt(depression_score),
+    log05_depression_score = log(depression_score + 0.5),
+    log1_depression_score = log(depression_score + 1)
+  )
+
+
+
+plot_data <- nhanes_clean %>%
+  dplyr::select(
+    depression_score,
+    log1_depression_score,
+    log05_depression_score,
+    sqrt_depression_score
+  ) %>%
+  pivot_longer(
+    cols = everything(),
+    names_to = "Transformation",
+    values_to = "Value"
+  )
+
+
+ggplot(plot_data, aes(x = Value)) +
+  geom_histogram(bins = 30) +
+  facet_wrap(~ Transformation, scales = "free") +
+  labs(
+    title = "Comparison of Depression Score Transformations",
+    x = "Value",
+    y = "Count"
+  ) +
+  theme_minimal()
+
+
+```
+
+different sample size
+
+```{r}
+
+library(dplyr)
+library(ggplot2)
+
+set.seed(123)
+
+x <- nhanes_clean$depression_score
+x <- as.numeric(x)
+x <- x[!is.na(x)]
+
+mu_hat <- mean(x)
+sigma2_hat <- var(x)
+
+sample_sizes <- c(30, 100)
+B <- 100
+
+results <- data.frame()
+
+for (n in sample_sizes) {
+
+  transformed_means <- replicate(B, {
+
+    sample_x <- sample(x, size = n, replace = TRUE)
+
+    xbar <- mean(sample_x)
+
+    log(xbar + 1)
+  })
+
+  empirical_var <- var(transformed_means)
+
+  delta_var <- (1 / (mu_hat + 1))^2 * (sigma2_hat / n)
+
+  results <- rbind(
+    results,
+    data.frame(
+      sample_size = n,
+      empirical_variance = empirical_var,
+      delta_variance = delta_var
+    )
+  )
+}
+
+results
+
+```
+
+
+
+
+
+
